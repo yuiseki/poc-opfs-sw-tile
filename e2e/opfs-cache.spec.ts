@@ -105,6 +105,44 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     await context.setOffline(false);
   });
 
+  test("低速回線でもアプリシェルはキャッシュから即起動する (network を待たない)", async ({
+    page,
+    context,
+  }) => {
+    // 1) 一度読み込んでアプリシェル(index.html / main.js)をキャッシュに載せる
+    await page.goto("/");
+    await waitForController(page);
+    await page.waitForFunction(
+      () => (window as unknown as { __map?: { loaded(): boolean } }).__map?.loaded(),
+      null,
+      { timeout: 30_000 }
+    );
+
+    // 2) アプリシェルへの「実ネットワーク」を大幅に遅延させる(劣悪回線を模擬)
+    await context.route(
+      (url) => {
+        if (url.origin !== "http://localhost:8080") return false;
+        const p = url.pathname;
+        return p === "/" || p.endsWith("/index.html") || p.endsWith("/main.js");
+      },
+      async (route) => {
+        await new Promise((r) => setTimeout(r, 10_000));
+        await route.continue();
+      }
+    );
+
+    // 3) リロード。SWR ならキャッシュから即返るので 10 秒の遅延に引きずられない。
+    const t0 = Date.now();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => !!(window as unknown as { __map?: unknown }).__map,
+      null,
+      { timeout: 8_000 }
+    );
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(8_000); // 遅延(10s)を待たずに起動できている
+  });
+
   test("チェックボックスで OPFS キャッシュを ON/OFF できる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

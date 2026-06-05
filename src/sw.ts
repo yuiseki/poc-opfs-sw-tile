@@ -517,23 +517,37 @@ async function cacheFirst(request: Request): Promise<Response> {
   return resp;
 }
 
-// アプリシェル: network-first。オンライン時は常に最新を取得して
-// デプロイした新しいコードが確実に反映されるようにし、取得結果をキャッシュに更新する。
-// オフライン時のみキャッシュ(なければプリキャッシュ済み index.html)へフォールバックする。
+// アプリシェル: stale-while-revalidate。
+// キャッシュがあれば即返して起動する(回線品質に依存しない高速なリロード)。
+// 同時に背後でネットワークから取得してキャッシュを更新し、次回以降に新しい内容を反映する。
+// → 不安定/低速回線でもリロードがネットワークを待たない。デプロイは次回リロードで反映。
+// キャッシュが無い初回のみネットワークを待ち、失敗時はプリキャッシュ済み index.html へ。
 async function appShell(request: Request): Promise<Response> {
   const cache = await caches.open(ASSET_CACHE);
-  try {
-    const resp = await fetch(request);
-    if (resp && resp.ok) cache.put(request, resp.clone()).catch(() => {});
-    return resp;
-  } catch (err) {
-    const hit = await cache.match(request);
-    if (hit) return hit;
-    if (request.mode === "navigate") {
-      const index =
-        (await cache.match("./index.html")) ?? (await cache.match("./"));
-      if (index) return index;
-    }
-    throw err;
+  const cached = await cache.match(request);
+
+  // 背後での再取得(キャッシュ更新)。応答はこれを待たない。
+  const revalidate = fetch(request)
+    .then((resp) => {
+      if (resp && resp.ok) cache.put(request, resp.clone()).catch(() => {});
+      return resp;
+    })
+    .catch(() => undefined);
+
+  if (cached) {
+    void revalidate; // 待たずにキャッシュを即返す
+    return cached;
   }
+
+  // キャッシュ未保有(初回など)はネットワークを待つ
+  const resp = await revalidate;
+  if (resp) return resp;
+
+  // オフライン初回などはプリキャッシュ済み index.html へフォールバック
+  if (request.mode === "navigate") {
+    const index =
+      (await cache.match("./index.html")) ?? (await cache.match("./"));
+    if (index) return index;
+  }
+  return fetch(request); // 最後の手段(ここでの失敗はどうにもならない)
 }
