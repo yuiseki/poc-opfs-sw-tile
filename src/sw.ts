@@ -81,8 +81,18 @@ sw.addEventListener("install", (event) => {
 });
 
 sw.addEventListener("activate", (event) => {
-  // 既存ページも即座にこの SW の制御下に置く
-  event.waitUntil(sw.clients.claim());
+  event.waitUntil(
+    (async () => {
+      // 古いバージョンのキャッシュを掃除(設定とアセットの現行版のみ残す)
+      const keep = new Set([ASSET_CACHE, SETTINGS_CACHE]);
+      const names = await caches.keys();
+      await Promise.all(
+        names.filter((n) => !keep.has(n)).map((n) => caches.delete(n))
+      );
+      // 既存ページも即座にこの SW の制御下に置く
+      await sw.clients.claim();
+    })()
+  );
 });
 
 // ページからの OPFS キャッシュ ON/OFF 切り替えを受け取る
@@ -308,17 +318,18 @@ async function cacheFirst(request: Request): Promise<Response> {
   return resp;
 }
 
-// アプリシェル: cache-first。オフラインで未キャッシュのときはナビゲーションに
-// プリキャッシュ済みの index.html を返してアプリを起動させる。
+// アプリシェル: network-first。オンライン時は常に最新を取得して
+// デプロイした新しいコードが確実に反映されるようにし、取得結果をキャッシュに更新する。
+// オフライン時のみキャッシュ(なければプリキャッシュ済み index.html)へフォールバックする。
 async function appShell(request: Request): Promise<Response> {
   const cache = await caches.open(ASSET_CACHE);
-  const hit = await cache.match(request);
-  if (hit) return hit;
   try {
     const resp = await fetch(request);
     if (resp && resp.ok) cache.put(request, resp.clone()).catch(() => {});
     return resp;
   } catch (err) {
+    const hit = await cache.match(request);
+    if (hit) return hit;
     if (request.mode === "navigate") {
       const index =
         (await cache.match("./index.html")) ?? (await cache.match("./"));

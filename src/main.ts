@@ -27,7 +27,21 @@ async function ensureServiceWorker(): Promise<boolean> {
     setStatus("この環境では Service Worker が使えません", "warn");
     return false;
   }
-  await navigator.serviceWorker.register("./sw.js");
+  // 既に制御下(=更新前の旧 SW が動作中)だったかを記録しておく
+  const hadController = !!navigator.serviceWorker.controller;
+
+  // 新しい SW が制御を引き継いだら(=更新時のみ)1 度だけリロードして
+  // 新しい main.js / index.html を読み込む。初回アクセス(未制御→制御開始)では
+  // 不要なリロードを避けるため hadController を条件にする。
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || refreshing) return;
+    refreshing = true;
+    location.reload();
+  });
+
+  // sw.js 自体は HTTP キャッシュを使わず常に更新確認する
+  await navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" });
   await navigator.serviceWorker.ready;
 
   if (navigator.serviceWorker.controller) return true;
