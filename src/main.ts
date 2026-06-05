@@ -179,20 +179,7 @@ function initMap(): void {
   let measuring = false;
   let firstIdleSeen = false;
 
-  // 診断用: 各イベントの発火回数を表示(実機で発火しているか確認するため)
-  let cStart = 0;
-  let cMove = 0;
-  let cEnd = 0;
-  let cIdle = 0;
-  const updateEv = (): void => {
-    $("evlog").textContent =
-      `イベント start:${cStart} move:${cMove} end:${cEnd} idle:${cIdle}`;
-  };
-  updateEv();
-
   map.on("movestart", () => {
-    cStart++;
-    updateEv();
     if (measuring) return;
     measuring = true;
     gestureStart = performance.now();
@@ -201,19 +188,14 @@ function initMap(): void {
     $("render-move").textContent = "計測中…";
   });
   // move / moveend どちらでも「最後に動いた時刻」を更新する。
-  // moveend が idle より後になる環境でも、move で確実に時刻が取れるため - にならない。
+  // moveend が idle より後になる環境でも、move で確実に時刻が取れる。
   map.on("move", () => {
-    cMove++;
     if (measuring) lastMove = performance.now();
   });
   map.on("moveend", () => {
-    cEnd++;
-    updateEv();
     if (measuring) lastMove = performance.now();
   });
   map.on("idle", () => {
-    cIdle++;
-    updateEv();
     if (measuring) {
       measuring = false;
       const now = performance.now();
@@ -241,6 +223,11 @@ function initMap(): void {
 
 $("refresh").addEventListener("click", () => void updateStats());
 $("clear").addEventListener("click", () => void clearCache());
+
+// パネルの折りたたみ(タイトルをタップで開閉。スマホで地図を広く使うため)
+$("panel-toggle").addEventListener("click", () => {
+  $("panel").classList.toggle("collapsed");
+});
 
 void (async () => {
   const ready = await ensureServiceWorker();
