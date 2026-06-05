@@ -105,6 +105,7 @@ sw.addEventListener("message", (event) => {
     event.ports[0]?.postMessage({
       count: networkBlockFetches,
       peak: peakConcurrentFetches,
+      memHits,
     });
   }
 });
@@ -227,6 +228,33 @@ async function ensureBlocks(
 // 同一ブロックの二重 fetch / 二重 write を防ぐ。
 const inFlight = new Map<number, Promise<Uint8Array | null>>();
 
+// Service Worker が生きている間だけ有効なメモリ内ブロックキャッシュ(簡易 LRU)。
+// OPFS の getFileHandle→getFile→arrayBuffer を毎回辿らずに済むので、ホットな
+// ブロック(ヘッダ・ディレクトリ・近接タイル)の再読み出しが速くなる。
+const memBlocks = new Map<number, Uint8Array>();
+const MEM_MAX_BLOCKS = 512; // 64KiB * 512 = 32MiB
+let memHits = 0; // 診断用
+
+function getMemBlock(idx: number): Uint8Array | undefined {
+  const v = memBlocks.get(idx);
+  if (!v) return undefined;
+  // 簡易 LRU: 参照したら末尾へ入れ直して「最近使用」にする
+  memBlocks.delete(idx);
+  memBlocks.set(idx, v);
+  memHits++;
+  return v;
+}
+
+function putMemBlock(idx: number, data: Uint8Array): void {
+  if (memBlocks.has(idx)) memBlocks.delete(idx);
+  memBlocks.set(idx, data);
+  while (memBlocks.size > MEM_MAX_BLOCKS) {
+    const oldest = memBlocks.keys().next().value; // 先頭 = 最古
+    if (oldest === undefined) break;
+    memBlocks.delete(oldest);
+  }
+}
+
 // 診断用: 実際にネットワークへ出たブロック取得の回数(dedup が効いているかの検証に使う)
 let networkBlockFetches = 0;
 
@@ -257,9 +285,16 @@ async function acquireBlock(
   dir: FileSystemDirectoryHandle,
   idx: number
 ): Promise<Uint8Array | null> {
-  // 1) 既に OPFS にあれば即返す
+  // 0) メモリキャッシュにあれば最速で返す(OPFS アクセスを省略)
+  const mem = getMemBlock(idx);
+  if (mem) return mem;
+
+  // 1) OPFS にあれば返し、メモリにも載せる
   const cached = await readBlock(dir, idx);
-  if (cached) return cached;
+  if (cached) {
+    putMemBlock(idx, cached);
+    return cached;
+  }
 
   // 2) 同じブロックを取得中なら、その Promise に相乗りする(二重取得を防ぐ)
   const existing = inFlight.get(idx);
@@ -308,6 +343,7 @@ async function fetchAndStoreBlock(
 
   const bytes = new Uint8Array(await resp.arrayBuffer());
   await writeBlock(dir, idx, bytes);
+  putMemBlock(idx, bytes); // 取得直後の再要求に備えてメモリにも載せる
   return bytes;
 }
 

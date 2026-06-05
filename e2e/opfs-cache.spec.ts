@@ -299,6 +299,56 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(p).toBeGreaterThanOrEqual(8);
   });
 
+  test("二度目の同一ブロック要求はメモリキャッシュから返る (OPFS/ネットワーク不要)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    const stats = (): Promise<{ count: number; memHits: number }> =>
+      page.evaluate(
+        () =>
+          new Promise((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-net-count" },
+              [ch.port2]
+            );
+          })
+      );
+
+    const fetchRange = (range: string) =>
+      page.evaluate(
+        ([url, r]) => fetch(url, { headers: { Range: r } }).then(() => undefined),
+        [
+          "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles",
+          range,
+        ] as const
+      );
+
+    // 地図のタイル読み込みが静止するまで待つ(memHits はグローバルなため)
+    let q = -1;
+    for (let i = 0; i < 25; i++) {
+      const c = (await stats()).count;
+      if (c === q) break;
+      q = c;
+      await page.waitForTimeout(400);
+    }
+
+    // 地図が触らない高オフセットの単一ブロックを一度取得(メモリ + OPFS に載る)
+    const RANGE = "bytes=61000000-61000050";
+    await fetchRange(RANGE);
+
+    const before = await stats();
+    // 同じブロックをもう一度要求 -> メモリヒットし、ネットワークは増えない
+    await fetchRange(RANGE);
+    const after = await stats();
+
+    expect(after.memHits - before.memHits).toBe(1); // メモリから返った
+    expect(after.count - before.count).toBe(0); // ネットワーク取得は発生しない
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

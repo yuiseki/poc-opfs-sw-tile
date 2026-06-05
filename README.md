@@ -117,13 +117,15 @@ npm test
 3. オフラインにしてリロードしても、アプリシェル + OPFS から地図を復元できること
 4. 同一ブロックへの同時要求が 1 回の fetch に集約されること（inFlight）
 5. 同時ネットワーク取得数が上限(12)を超えないこと（セマフォ）
-6. 「キャッシュ全消去」で OPFS が空になること
+6. 二度目の同一ブロック要求がメモリキャッシュから返ること（OPFS/ネットワーク不要）
+7. 「キャッシュ全消去」で OPFS が空になること
 
 ## 技術メモ
 
 - **OPFS の書き込みは Service Worker から async API (`createWritable`) で行う**。同期 API (`createSyncAccessHandle`) は専用 Worker 限定で SW では使えない。
 - ブロックは固定長 (64KB) に整列。各ブロックは 1 回の Range リクエストで取得する。
 - **OPFS 読み取りは並列**。`ensureBlocks` は必要ブロックを `Promise.all` で同時に読む（逐次 `await` しない）。
+- **メモリ内ブロックキャッシュ (簡易 LRU)**: SW 生存中だけ、最近読んだブロックを `Map<blockIndex, Uint8Array>` に保持（`MEM_MAX_BLOCKS=512` ≒ 32MiB）。`getFileHandle→getFile→arrayBuffer` の OPFS 経路を毎回辿らずに済むため、ホットなブロック（ヘッダ・ディレクトリ・近接タイル）の再読み出しが速い。`acquireBlock()` はメモリ→OPFS→ネットワークの順に当たる。
 - **同時 Range 要求の重複取得防止 (inFlight Map)**: MapLibre は同時に多数のタイルを要求し、近接タイルが同じ内部範囲(=同じブロック)を要求しうる。`Map<blockIndex, Promise>` で「取得中」の Promise をブロック単位で共有し、同一ブロックの二重 fetch / 二重 write を防ぐ。`acquireBlock()` が起点。
 - **同時ネットワーク取得数の上限 (セマフォ)**: 上流リクエストと OPFS 書き込みの集中を避けるため、実ネットワーク取得の同時実行を `MAX_CONCURRENT_FETCHES`(=12) に制限する。キャッシュ済みブロックの読み出しは上限の対象外（即返す）。
 - 総ファイルサイズは最初の `Content-Range` レスポンスから学習し `meta.json` に保存（`Content-Range` ヘッダの組み立てに使用）。
