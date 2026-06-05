@@ -134,6 +134,18 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     await expect.poll(xCache, { timeout: 10_000 }).toBe("OPFS");
   });
 
+  test("リロード初回の描画時間が (初回) 付きで表示される", async ({ page }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    // 操作せずとも、最初の idle で初回描画時間が表示される
+    await expect
+      .poll(async () => (await page.locator("#render").textContent()) ?? "", {
+        timeout: 30_000,
+      })
+      .toMatch(/^\d+\s*ms\s*\(初回\)$/);
+  });
+
   test("再描画(movestart→idle)の所要時間がパネルに表示される", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

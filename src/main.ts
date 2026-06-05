@@ -165,12 +165,15 @@ function initMap(): void {
     timer = window.setTimeout(updateStats, 400);
   });
 
-  // 再描画にかかった時間を計測する。
-  //   movestart : ズーム/パン等の再描画開始
+  // 描画完了までの時間を計測する。
   //   idle      : カメラ停止 + 必要タイル全ロード + 描画完了の確定シグナル
-  // この差分(ms)を表示する。OPFS キャッシュの有無で通信支配分の差が見える。
+  //   movestart : ズーム/パン等の再描画開始
+  // - 初回(リロード直後)は「ナビゲーション開始 → 最初の idle」を表示(= 体感速度)。
+  // - 以降は movestart → idle の差分で上書きする。
+  // OPFS キャッシュの有無で通信支配分の差が見える。
   let renderT0 = 0;
   let measuring = false;
+  let firstIdleSeen = false;
   map.on("movestart", () => {
     if (measuring) return;
     measuring = true;
@@ -178,10 +181,16 @@ function initMap(): void {
     $("render").textContent = "計測中…";
   });
   map.on("idle", () => {
-    if (!measuring) return;
-    measuring = false;
-    const ms = performance.now() - renderT0;
-    $("render").textContent = `${Math.round(ms)} ms`;
+    if (measuring) {
+      measuring = false;
+      $("render").textContent = `${Math.round(performance.now() - renderT0)} ms`;
+      return;
+    }
+    if (!firstIdleSeen) {
+      firstIdleSeen = true;
+      // performance.now() はナビゲーション開始(リロード)からの経過 ms
+      $("render").textContent = `${Math.round(performance.now())} ms (初回)`;
+    }
   });
 
   styleSelect.addEventListener("change", () => {
