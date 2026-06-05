@@ -166,24 +166,36 @@ function initMap(): void {
   });
 
   // 描画完了までの時間を計測する。
-  //   idle      : カメラ停止 + 必要タイル全ロード + 描画完了の確定シグナル
-  //   movestart : ズーム/パン等の再描画開始
-  // - 初回(リロード直後)は「ナビゲーション開始 → 最初の idle」を表示(= 体感速度)。
-  // - 以降は movestart → idle の差分で上書きする。
-  // OPFS キャッシュの有無で通信支配分の差が見える。
-  let renderT0 = 0;
+  //   movestart : ズーム/パン等の操作開始
+  //   moveend   : カメラの移動が止まった瞬間(スワイプやアニメーションの終了)
+  //   idle      : 必要タイル全ロード + 描画完了の確定シグナル
+  // 2 つの指標を出す:
+  //   #render      = movestart → idle … 操作全体(スワイプ時間を含む)
+  //   #render-move = moveend  → idle … 移動が止まってからの「実描画」時間
+  // スマホで長くスワイプしても #render-move は実際の描画分だけになり、誤解を防ぐ。
+  // 初回(リロード直後)は #render に「ナビゲーション開始 → 最初の idle」を表示。
+  let gestureStart = 0;
+  let lastMoveEnd = 0;
   let measuring = false;
   let firstIdleSeen = false;
   map.on("movestart", () => {
     if (measuring) return;
     measuring = true;
-    renderT0 = performance.now();
+    gestureStart = performance.now();
+    lastMoveEnd = 0;
     $("render").textContent = "計測中…";
+    $("render-move").textContent = "計測中…";
+  });
+  map.on("moveend", () => {
+    if (measuring) lastMoveEnd = performance.now(); // 直近の「移動停止」時刻
   });
   map.on("idle", () => {
     if (measuring) {
       measuring = false;
-      $("render").textContent = `${Math.round(performance.now() - renderT0)} ms`;
+      const now = performance.now();
+      $("render").textContent = `${Math.round(now - gestureStart)} ms`;
+      $("render-move").textContent =
+        lastMoveEnd > 0 ? `${Math.round(now - lastMoveEnd)} ms` : "-";
       return;
     }
     if (!firstIdleSeen) {

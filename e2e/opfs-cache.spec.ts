@@ -184,7 +184,9 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
       .toMatch(/^\d+\s*ms\s*\(初回\)$/);
   });
 
-  test("再描画(movestart→idle)の所要時間がパネルに表示される", async ({ page }) => {
+  test("再描画の所要時間(movestart→idle と moveend→idle)がパネルに表示される", async ({
+    page,
+  }) => {
     await page.goto("/");
     await waitForController(page);
 
@@ -203,9 +205,15 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
       m.zoomTo(m.getZoom() + 2);
     });
 
-    // "NNN ms" が表示される
+    // 操作全体(movestart→idle)が "NNN ms" で表示される
     await expect
       .poll(async () => (await page.locator("#render").textContent()) ?? "", {
+        timeout: 30_000,
+      })
+      .toMatch(/^\d+\s*ms$/);
+    // 移動停止後(moveend→idle)も "NNN ms" で表示される
+    await expect
+      .poll(async () => (await page.locator("#render-move").textContent()) ?? "", {
         timeout: 30_000,
       })
       .toMatch(/^\d+\s*ms$/);
