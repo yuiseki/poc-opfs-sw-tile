@@ -105,6 +105,35 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     await context.setOffline(false);
   });
 
+  test("チェックボックスで OPFS キャッシュを ON/OFF できる", async ({ page }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    // SW 経由で Range を取得したときの X-Cache ヘッダを返す。
+    // OPFS 経路を通ったときだけ "OPFS"、無効化時は素通しで null になる。
+    const xCache = () =>
+      page.evaluate(async () => {
+        const r = await fetch(
+          "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles",
+          { headers: { Range: "bytes=0-1023" } }
+        );
+        return r.headers.get("X-Cache");
+      });
+
+    const toggle = page.locator("#cache-toggle");
+
+    // 既定: ON → OPFS 経路
+    await expect.poll(xCache, { timeout: 10_000 }).toBe("OPFS");
+
+    // OFF → 素通し(X-Cache が付かない)
+    await toggle.uncheck();
+    await expect.poll(xCache, { timeout: 10_000 }).not.toBe("OPFS");
+
+    // ON に戻す → 再び OPFS 経路
+    await toggle.check();
+    await expect.poll(xCache, { timeout: 10_000 }).toBe("OPFS");
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

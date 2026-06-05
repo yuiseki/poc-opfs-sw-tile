@@ -58,6 +58,17 @@
       #panel button:hover {
         background: #e5e7eb;
       }
+      .toggle {
+        display: flex !important;
+        align-items: center;
+        gap: 6px;
+        margin-top: 10px;
+        font-weight: 500 !important;
+      }
+      .toggle input {
+        width: auto;
+        margin: 0;
+      }
       .stats {
         margin-top: 10px;
         padding-top: 10px;
@@ -94,6 +105,11 @@
           OSM Fiord
         </option>
       </select>
+
+      <label class="toggle" for="cache-toggle">
+        <input type="checkbox" id="cache-toggle" checked />
+        OPFS キャッシュを使う
+      </label>
 
       <div class="stats">
         OPFS キャッシュ(アクセスした範囲のみ):<br />

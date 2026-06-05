@@ -8,6 +8,7 @@ import maplibregl from "maplibre-gl";
 import { Protocol } from "pmtiles";
 
 const PMTILES_OPFS_DIR = "pmtiles-blocks";
+const CACHE_PREF_KEY = "opfs-cache-enabled";
 
 const $ = <T extends HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
@@ -40,6 +41,38 @@ async function ensureServiceWorker(): Promise<boolean> {
     )
   );
   return true;
+}
+
+// ---- OPFS キャッシュ ON/OFF トグル ----
+// 設定は localStorage に保存し、現在制御中の SW へ postMessage で伝える。
+function isCacheEnabled(): boolean {
+  return localStorage.getItem(CACHE_PREF_KEY) !== "0";
+}
+
+function sendCacheState(enabled: boolean): void {
+  navigator.serviceWorker.controller?.postMessage({
+    type: "set-cache",
+    enabled,
+  });
+}
+
+function setupCacheToggle(): void {
+  const toggle = $<HTMLInputElement>("cache-toggle");
+  toggle.checked = isCacheEnabled();
+  // 起動時点の状態を SW に同期
+  sendCacheState(toggle.checked);
+
+  toggle.addEventListener("change", () => {
+    const enabled = toggle.checked;
+    localStorage.setItem(CACHE_PREF_KEY, enabled ? "1" : "0");
+    sendCacheState(enabled);
+    setStatus(
+      enabled
+        ? "OPFS キャッシュ: 有効(アクセスした範囲を保存)"
+        : "OPFS キャッシュ: 無効(常にネットワークへ)",
+      "ok"
+    );
+  });
 }
 
 // ---- OPFS のキャッシュ統計を表示 ----
@@ -124,6 +157,7 @@ void (async () => {
   } catch {
     /* noop */
   }
+  setupCacheToggle();
   initMap();
   void updateStats();
 })();

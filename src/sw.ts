@@ -35,6 +35,30 @@ const ASSET_CACHE = `map-assets-${VERSION}`;
 const MAPLIBRE_CSS =
   "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css";
 
+// OPFS キャッシュの ON/OFF 設定。ページからの postMessage で切り替える。
+// SW は再起動でメモリが消えるため Cache API に永続化し、初回参照時に読み込む。
+const SETTINGS_CACHE = `settings-${VERSION}`;
+const SETTINGS_KEY = "https://sw.settings/cache-enabled";
+let cacheEnabled: boolean | null = null; // null = 未ロード
+
+async function loadCacheEnabled(): Promise<boolean> {
+  if (cacheEnabled !== null) return cacheEnabled;
+  try {
+    const cache = await caches.open(SETTINGS_CACHE);
+    const res = await cache.match(SETTINGS_KEY);
+    cacheEnabled = res ? (await res.text()) === "1" : true; // 既定は ON
+  } catch {
+    cacheEnabled = true;
+  }
+  return cacheEnabled;
+}
+
+async function saveCacheEnabled(enabled: boolean): Promise<void> {
+  cacheEnabled = enabled;
+  const cache = await caches.open(SETTINGS_CACHE);
+  await cache.put(SETTINGS_KEY, new Response(enabled ? "1" : "0"));
+}
+
 // オフラインでも起動できるようプリキャッシュするアプリシェル
 const APP_SHELL = ["./", "./index.html", "./main.js", MAPLIBRE_CSS];
 
@@ -59,6 +83,14 @@ sw.addEventListener("install", (event) => {
 sw.addEventListener("activate", (event) => {
   // 既存ページも即座にこの SW の制御下に置く
   event.waitUntil(sw.clients.claim());
+});
+
+// ページからの OPFS キャッシュ ON/OFF 切り替えを受け取る
+sw.addEventListener("message", (event) => {
+  const data = event.data as { type?: string; enabled?: boolean } | null;
+  if (data?.type === "set-cache") {
+    event.waitUntil(saveCacheEnabled(!!data.enabled));
+  }
 });
 
 // -------------------- fetch 横取り --------------------
@@ -101,6 +133,9 @@ async function handlePmtiles(request: Request): Promise<Response> {
   const start = parseInt(m[1], 10);
   const end = parseInt(m[2], 10);
   if (end < start) return fetch(request);
+
+  // OPFS キャッシュが無効なら、読み書きせずそのままネットワークへ流す
+  if (!(await loadCacheEnabled())) return fetch(request);
 
   try {
     const dir = await getCacheDir();
