@@ -265,6 +265,40 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(after - base).toBe(1);
   });
 
+  test("同時ネットワーク取得数が上限(12)を超えない", async ({ page }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    const peak = (): Promise<number> =>
+      page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data.peak as number);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-net-count" },
+              [ch.port2]
+            );
+          })
+      );
+
+    // 未キャッシュの異なるブロックを 30 本同時に要求して取得を集中させる
+    await page.evaluate(async () => {
+      const url =
+        "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles";
+      const reqs = Array.from({ length: 30 }, (_, i) => {
+        const start = 60_000_000 + i * 65536; // 各ブロックを 1 つずつずらす
+        return fetch(url, { headers: { Range: `bytes=${start}-${start + 50}` } });
+      });
+      await Promise.all(reqs);
+    });
+
+    const p = await peak();
+    // 上限を超えない。かつ実際に十分並列化されている(逐次ではない)。
+    expect(p).toBeLessThanOrEqual(12);
+    expect(p).toBeGreaterThanOrEqual(8);
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

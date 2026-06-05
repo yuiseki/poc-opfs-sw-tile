@@ -101,8 +101,11 @@ sw.addEventListener("message", (event) => {
   if (data?.type === "set-cache") {
     event.waitUntil(saveCacheEnabled(!!data.enabled));
   } else if (data?.type === "debug-net-count") {
-    // 診断用: これまでのネットワークブロック取得回数を返す
-    event.ports[0]?.postMessage({ count: networkBlockFetches });
+    // 診断用: ネットワーク取得回数と、観測された同時取得数の最大を返す
+    event.ports[0]?.postMessage({
+      count: networkBlockFetches,
+      peak: peakConcurrentFetches,
+    });
   }
 });
 
@@ -227,6 +230,29 @@ const inFlight = new Map<number, Promise<Uint8Array | null>>();
 // 診断用: 実際にネットワークへ出たブロック取得の回数(dedup が効いているかの検証に使う)
 let networkBlockFetches = 0;
 
+// 同時に走るネットワーク取得の上限。MapLibre は多数のタイルを一斉に要求するため、
+// 上限を設けないと上流リクエストと OPFS 書き込みが一気に集中する。8〜16 が目安。
+const MAX_CONCURRENT_FETCHES = 12;
+let activeFetches = 0;
+let peakConcurrentFetches = 0; // 診断用: 観測された同時取得数の最大
+const fetchWaiters: Array<() => void> = [];
+
+async function acquireFetchSlot(): Promise<void> {
+  if (activeFetches < MAX_CONCURRENT_FETCHES) {
+    activeFetches++;
+  } else {
+    // 空きが出るまで待つ。スロットは releaseFetchSlot から引き継ぐ(カウント据え置き)。
+    await new Promise<void>((resolve) => fetchWaiters.push(resolve));
+  }
+  if (activeFetches > peakConcurrentFetches) peakConcurrentFetches = activeFetches;
+}
+
+function releaseFetchSlot(): void {
+  const next = fetchWaiters.shift();
+  if (next) next(); // 待機者へスロットを引き継ぐ(activeFetches は減らさない)
+  else activeFetches--;
+}
+
 async function acquireBlock(
   dir: FileSystemDirectoryHandle,
   idx: number
@@ -240,7 +266,16 @@ async function acquireBlock(
   if (existing) return existing;
 
   // 3) 自分が取得を担当する。完了するまで他の要求は (2) で待つ。
-  const task = fetchAndStoreBlock(dir, idx);
+  //    inFlight への登録は同期的に行い(相乗りを成立させる)、実 fetch は
+  //    同時実行数の上限(セマフォ)内で走らせる。
+  const task = (async () => {
+    await acquireFetchSlot();
+    try {
+      return await fetchAndStoreBlock(dir, idx);
+    } finally {
+      releaseFetchSlot();
+    }
+  })();
   inFlight.set(idx, task);
   try {
     return await task;
