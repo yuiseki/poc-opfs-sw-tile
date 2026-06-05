@@ -535,6 +535,55 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
       .toBe(true);
   });
 
+  test("グリフ/スプライトが OPFS(map-assets)に保存され OPFS から返る", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    // 地図のロードでグリフ/スプライトが取得される。OPFS の map-assets に貯まるのを待つ。
+    const assetCount = (): Promise<number> =>
+      page.evaluate(async () => {
+        try {
+          const root = await navigator.storage.getDirectory();
+          const dir = await root.getDirectoryHandle("map-assets");
+          let c = 0;
+          for await (const [, h] of dir as unknown as AsyncIterable<
+            [string, FileSystemHandle]
+          >) {
+            if (h.kind === "file") c++;
+          }
+          return c;
+        } catch {
+          return 0;
+        }
+      });
+
+    await expect
+      .poll(assetCount, { timeout: 30_000 })
+      .toBeGreaterThan(0);
+
+    // OPFS に保存済みのアセット(ファイル名は encodeURIComponent(url))を 1 つ取り出し、
+    // その URL を要求すると OPFS 経路(X-Cache: OPFS)で返ることを確認する。
+    const storedUrl = await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory();
+      const dir = await root.getDirectoryHandle("map-assets");
+      for await (const [name, h] of dir as unknown as AsyncIterable<
+        [string, FileSystemHandle]
+      >) {
+        if (h.kind === "file") return decodeURIComponent(name);
+      }
+      return null;
+    });
+    expect(storedUrl).toBeTruthy();
+
+    const xcache = await page.evaluate(async (u) => {
+      const r = await fetch(u as string);
+      return r.headers.get("X-Cache");
+    }, storedUrl);
+    expect(xcache).toBe("OPFS");
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

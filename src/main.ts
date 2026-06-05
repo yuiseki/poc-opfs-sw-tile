@@ -8,6 +8,7 @@ import maplibregl from "maplibre-gl";
 import { Protocol } from "pmtiles";
 
 const PMTILES_OPFS_DIR = "pmtiles-blocks";
+const ASSET_OPFS_DIR = "map-assets"; // グリフ/スプライト
 const CACHE_PREF_KEY = "opfs-cache-enabled";
 
 const $ = <T extends HTMLElement>(id: string): T =>
@@ -121,6 +122,22 @@ async function updateStats(): Promise<void> {
     }
     $("blocks").textContent = count.toLocaleString();
     $("size").textContent = formatBytes(bytes);
+
+    // グリフ/スプライト(map-assets)の件数も表示
+    let assetCount = 0;
+    try {
+      const adir = await root.getDirectoryHandle(ASSET_OPFS_DIR, {
+        create: true,
+      });
+      for await (const [, h] of adir as unknown as AsyncIterable<
+        [string, FileSystemHandle]
+      >) {
+        if (h.kind === "file") assetCount++;
+      }
+    } catch {
+      /* noop */
+    }
+    $("assets").textContent = assetCount.toLocaleString();
   } catch (e) {
     console.error(e);
   }
@@ -131,6 +148,7 @@ async function clearCache(): Promise<void> {
   await root
     .removeEntry(PMTILES_OPFS_DIR, { recursive: true })
     .catch(() => {});
+  await root.removeEntry(ASSET_OPFS_DIR, { recursive: true }).catch(() => {});
   await updateStats();
   setStatus("OPFS キャッシュを消去しました", "ok");
 }

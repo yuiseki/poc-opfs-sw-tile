@@ -27,7 +27,12 @@ const BLOCK_SIZE = 64 * 1024; // 64KiB
 // OPFS 内のディレクトリ名(ブロックファイルと meta.json を格納)
 const OPFS_DIR = "pmtiles-blocks";
 
-// スタイル / グリフ / スプライトなどの静的アセット(これらは Cache API で cache-first)
+// グリフ(フォント)・スプライトは OPFS にファイルとして置く。
+const FONTS_PREFIX = "https://z.yuiseki.net/static/maps/fonts/";
+const SPRITES_PREFIX = "https://z.yuiseki.net/static/maps/sprites/";
+const OPFS_ASSET_DIR = "map-assets";
+
+// スタイル(JSON)・MapLibre CSS は引き続き Cache API で cache-first。
 const ASSET_PREFIX = "https://z.yuiseki.net/static/maps/";
 const ASSET_CACHE = `map-assets-${VERSION}`;
 
@@ -154,12 +159,17 @@ sw.addEventListener("fetch", (event) => {
     event.respondWith(handlePmtiles(req));
     return;
   }
-  // 2) スタイル / グリフ / スプライト、MapLibre CSS -> Cache API (cache-first)
+  // 2) グリフ / スプライト -> OPFS にファイルとして保存(cache-first)
+  if (url.startsWith(FONTS_PREFIX) || url.startsWith(SPRITES_PREFIX)) {
+    event.respondWith(opfsAsset(req));
+    return;
+  }
+  // 3) スタイル(JSON) / MapLibre CSS -> Cache API (cache-first)
   if (url.startsWith(ASSET_PREFIX) || url === MAPLIBRE_CSS) {
     event.respondWith(cacheFirst(req));
     return;
   }
-  // 3) アプリシェル(同一オリジンのナビゲーション / main.js) -> cache-first + オフラインフォールバック
+  // 4) アプリシェル(同一オリジンのナビゲーション / main.js) -> stale-while-revalidate
   const isSameOrigin = new URL(req.url).origin === sw.location.origin;
   if (isSameOrigin && (req.mode === "navigate" || url.endsWith("/main.js"))) {
     event.respondWith(appShell(req));
@@ -557,6 +567,70 @@ async function persistTotal(
     await w.close();
   } catch {
     /* 永続化失敗は無視(次回取得時に再学習される) */
+  }
+}
+
+// -------------------- グリフ/スプライトの OPFS キャッシュ --------------------
+// グリフ(.pbf)・スプライト(.json/.png)を OPFS にファイルとして保存する。
+// URL を 1 ファイルに対応させ、cache-first(あれば OPFS から返す)で動く。
+// 永続化は背後で行い(fire-and-forget)、レスポンスを待たせない。
+
+async function getAssetDir(): Promise<FileSystemDirectoryHandle> {
+  const root = await navigator.storage.getDirectory();
+  return root.getDirectoryHandle(OPFS_ASSET_DIR, { create: true });
+}
+
+// URL -> OPFS ファイル名(スラッシュ等を含まない安全な名前にする)
+function assetFileName(url: string): string {
+  return encodeURIComponent(url.split("?")[0]);
+}
+
+// 拡張子から Content-Type を推定(これらは既知の静的アセットなので十分)
+function assetContentType(url: string): string {
+  if (url.endsWith(".pbf")) return "application/x-protobuf";
+  if (url.endsWith(".json")) return "application/json";
+  if (url.endsWith(".png")) return "image/png";
+  return "application/octet-stream";
+}
+
+async function opfsAsset(request: Request): Promise<Response> {
+  const url = request.url.split("?")[0];
+  const name = assetFileName(url);
+
+  // OPFS にあれば即返す
+  try {
+    const dir = await getAssetDir();
+    const fh = await dir.getFileHandle(name);
+    const file = await fh.getFile();
+    return new Response(file, {
+      headers: {
+        "Content-Type": assetContentType(url),
+        "Content-Length": String(file.size),
+        "X-Cache": "OPFS",
+      },
+    });
+  } catch {
+    /* 未キャッシュ -> ネットワークへ */
+  }
+
+  const resp = await fetch(request);
+  if (resp.ok) {
+    // 取得したバイト列を背後で OPFS に保存(レスポンスは待たせない)
+    const buf = new Uint8Array(await resp.clone().arrayBuffer());
+    void persistAsset(name, buf);
+  }
+  return resp;
+}
+
+async function persistAsset(name: string, bytes: Uint8Array): Promise<void> {
+  try {
+    const dir = await getAssetDir();
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(bytes as unknown as Uint8Array<ArrayBuffer>);
+    await w.close();
+  } catch {
+    /* 永続化失敗は無視(次回再取得で復旧する) */
   }
 }
 

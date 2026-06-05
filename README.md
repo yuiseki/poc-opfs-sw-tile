@@ -24,7 +24,8 @@ MapLibre GL ──(pmtiles:// プロトコル)──▶ fetch(Range: bytes=start
 ```
 
 - **PMTiles の Range リクエスト** → 64KB ブロックに整列して OPFS (`pmtiles-blocks/`) にキャッシュ。
-- **スタイル / グリフ / スプライト / MapLibre CSS** → Cache API で cache-first。
+- **グリフ(フォント) / スプライト** → OPFS (`map-assets/`) にファイルとして cache-first 保存（永続化は背後で実行）。
+- **スタイル(JSON) / MapLibre CSS** → Cache API で cache-first。
 - **アプリシェル (index.html / main.js)** → install 時にプリキャッシュ。オフラインでもアプリが起動する。
 
 左上パネルの **「OPFS キャッシュを使う」チェックボックス**で、OPFS 経由のキャッシュを ON/OFF できる。
