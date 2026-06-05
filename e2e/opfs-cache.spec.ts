@@ -205,6 +205,66 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(status).toContain("未制御");
   });
 
+  test("同一ブロックへの同時要求は 1 回の fetch に集約される (inFlight)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    // SW が実際にネットワークへ出たブロック取得回数を問い合わせる
+    const netCount = (): Promise<number> =>
+      page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data.count as number);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-net-count" },
+              [ch.port2]
+            );
+          })
+      );
+
+    // 地図が要求しない高オフセット領域(= 未キャッシュの単一ブロック)を選ぶ
+    const RANGE = "bytes=50000000-50000100";
+
+    // 地図のタイル読み込みが静止する(ネットワーク取得が止まる)まで待ってから計測する。
+    // networkBlockFetches はグローバルなので、地図の裏での取得を巻き込まないようにする。
+    let base = -1;
+    for (let i = 0; i < 25; i++) {
+      const c = await netCount();
+      if (c === base) break; // 前回と同値 = 静止
+      base = c;
+      await page.waitForTimeout(400);
+    }
+
+    // 同じ未キャッシュ範囲を 10 本同時に要求する
+    const results = await page.evaluate(
+      async ([url, range]) => {
+        const reqs = Array.from({ length: 10 }, () =>
+          fetch(url, { headers: { Range: range } }).then(async (res) => {
+            const buf = new Uint8Array(await res.arrayBuffer());
+            return { len: buf.length, x: res.headers.get("X-Cache") };
+          })
+        );
+        return Promise.all(reqs);
+      },
+      [
+        "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles",
+        RANGE,
+      ] as const
+    );
+
+    // 全て OPFS 経路で同一の正しいバイト列(101 バイト)が返る
+    expect(results.every((r) => r.x === "OPFS")).toBe(true);
+    expect(new Set(results.map((r) => r.len)).size).toBe(1);
+    expect(results[0].len).toBe(101);
+
+    // 10 本の同時要求でも、ネットワークへ出たのは 1 回だけ(二重取得が防がれている)
+    const after = await netCount();
+    expect(after - base).toBe(1);
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

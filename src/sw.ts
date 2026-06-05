@@ -100,6 +100,9 @@ sw.addEventListener("message", (event) => {
   const data = event.data as { type?: string; enabled?: boolean } | null;
   if (data?.type === "set-cache") {
     event.waitUntil(saveCacheEnabled(!!data.enabled));
+  } else if (data?.type === "debug-net-count") {
+    // 診断用: これまでのネットワークブロック取得回数を返す
+    event.ports[0]?.postMessage({ count: networkBlockFetches });
   }
 });
 
@@ -193,8 +196,8 @@ async function handlePmtiles(request: Request): Promise<Response> {
 }
 
 /**
- * firstBlock..lastBlock のブロックを Map<blockIndex, Uint8Array> で返す。
- * 不足分は連続範囲ごとにまとめて 1 回の Range リクエストで取得し OPFS に保存する。
+ * firstBlock..lastBlock の各ブロックを並行取得して Map<blockIndex, Uint8Array> で返す。
+ * 取得は acquireBlock 経由で行うため、同じブロックへの同時要求は 1 回の fetch に集約される。
  */
 async function ensureBlocks(
   dir: FileSystemDirectoryHandle,
@@ -202,52 +205,75 @@ async function ensureBlocks(
   lastBlock: number
 ): Promise<Map<number, Uint8Array>> {
   const blocks = new Map<number, Uint8Array>();
-  const missing: number[] = [];
+  const indices: number[] = [];
+  for (let b = firstBlock; b <= lastBlock; b++) indices.push(b);
 
-  for (let b = firstBlock; b <= lastBlock; b++) {
-    const data = await readBlock(dir, b);
-    if (data) blocks.set(b, data);
-    else missing.push(b);
-  }
-
-  // 連続する欠損ブロックをグルーピング(リクエスト回数を減らす)
-  const groups: { start: number; end: number }[] = [];
-  for (const b of missing) {
-    const last = groups[groups.length - 1];
-    if (last && b === last.end + 1) last.end = b;
-    else groups.push({ start: b, end: b });
-  }
-
-  for (const g of groups) {
-    const rangeStart = g.start * BLOCK_SIZE;
-    // 末尾はファイル終端を越える可能性があるがサーバ側がクランプしてくれる
-    const rangeEnd = (g.end + 1) * BLOCK_SIZE - 1;
-
-    const resp = await fetch(PMTILES_URL, {
-      headers: { Range: `bytes=${rangeStart}-${rangeEnd}` },
-    });
-    if (!resp.ok && resp.status !== 206) {
-      throw new Error(`upstream range fetch failed: ${resp.status}`);
-    }
-
-    // 総サイズを学習して保存(Content-Range: bytes s-e/total)
-    const cr = resp.headers.get("Content-Range");
-    if (cr && cr.includes("/")) {
-      const total = cr.split("/")[1].trim();
-      if (total && total !== "*") await writeTotal(dir, total);
-    }
-
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    for (let b = g.start; b <= g.end; b++) {
-      const off = (b - g.start) * BLOCK_SIZE;
-      if (off >= buf.length) break; // これ以降は EOF 越え
-      const slice = buf.slice(off, Math.min(off + BLOCK_SIZE, buf.length));
-      await writeBlock(dir, b, slice);
-      blocks.set(b, slice);
-    }
-  }
+  await Promise.all(
+    indices.map(async (b) => {
+      const data = await acquireBlock(dir, b);
+      if (data) blocks.set(b, data);
+    })
+  );
 
   return blocks;
+}
+
+// 取得中ブロックの共有 Promise。
+// MapLibre は同時に多数のタイルを要求し、近接タイルが同じ PMTiles 内部範囲(=同じブロック)を
+// 要求することがある。ブロック単位で「今まさに取得中」の Promise を共有することで、
+// 同一ブロックの二重 fetch / 二重 write を防ぐ。
+const inFlight = new Map<number, Promise<Uint8Array | null>>();
+
+// 診断用: 実際にネットワークへ出たブロック取得の回数(dedup が効いているかの検証に使う)
+let networkBlockFetches = 0;
+
+async function acquireBlock(
+  dir: FileSystemDirectoryHandle,
+  idx: number
+): Promise<Uint8Array | null> {
+  // 1) 既に OPFS にあれば即返す
+  const cached = await readBlock(dir, idx);
+  if (cached) return cached;
+
+  // 2) 同じブロックを取得中なら、その Promise に相乗りする(二重取得を防ぐ)
+  const existing = inFlight.get(idx);
+  if (existing) return existing;
+
+  // 3) 自分が取得を担当する。完了するまで他の要求は (2) で待つ。
+  const task = fetchAndStoreBlock(dir, idx);
+  inFlight.set(idx, task);
+  try {
+    return await task;
+  } finally {
+    inFlight.delete(idx);
+  }
+}
+
+async function fetchAndStoreBlock(
+  dir: FileSystemDirectoryHandle,
+  idx: number
+): Promise<Uint8Array | null> {
+  const start = idx * BLOCK_SIZE;
+  const end = start + BLOCK_SIZE - 1; // 終端越えはサーバが 206 でクランプ
+  networkBlockFetches++;
+  const resp = await fetch(PMTILES_URL, {
+    headers: { Range: `bytes=${start}-${end}` },
+  });
+  if (resp.status === 416) return null; // 範囲外(EOF 越え)
+  if (!resp.ok && resp.status !== 206) {
+    throw new Error(`upstream range fetch failed: ${resp.status}`);
+  }
+
+  // 総サイズを学習して保存(Content-Range: bytes s-e/total)
+  const cr = resp.headers.get("Content-Range");
+  if (cr && cr.includes("/")) {
+    const total = cr.split("/")[1].trim();
+    if (total && total !== "*") await writeTotal(dir, total);
+  }
+
+  const bytes = new Uint8Array(await resp.arrayBuffer());
+  await writeBlock(dir, idx, bytes);
+  return bytes;
 }
 
 // -------------------- OPFS ヘルパ --------------------
@@ -283,22 +309,31 @@ async function writeBlock(
   await w.close();
 }
 
+// 総サイズはセッション中変わらないので一度だけ書き、以降はメモリから返す。
+// (並行ブロック取得で writeTotal が多重に呼ばれても meta.json への書き込み競合を避ける)
+let knownTotal: string | null = null;
+
 async function readTotal(
   dir: FileSystemDirectoryHandle
 ): Promise<string | null> {
+  if (knownTotal !== null) return knownTotal;
   try {
     const fh = await dir.getFileHandle("meta.json");
     const file = await fh.getFile();
-    return (JSON.parse(await file.text()) as { totalSize: string }).totalSize;
+    knownTotal = (JSON.parse(await file.text()) as { totalSize: string })
+      .totalSize;
   } catch {
-    return null;
+    knownTotal = null;
   }
+  return knownTotal;
 }
 
 async function writeTotal(
   dir: FileSystemDirectoryHandle,
   total: string
 ): Promise<void> {
+  if (knownTotal === total) return; // 既知なら書かない(無駄な書き込み競合を避ける)
+  knownTotal = total;
   const fh = await dir.getFileHandle("meta.json", { create: true });
   const w = await fh.createWritable();
   await w.write(JSON.stringify({ totalSize: total }));
