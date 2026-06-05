@@ -1,0 +1,26 @@
+{
+  "name": "poc-opfs-sw-tile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OPFS + Service Worker でベクトルタイル(PMTiles)をローカルキャッシュする PoC",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "serve": "python3 -m http.server 8080 --directory docs",
+    "dev": "npm run build && npm run serve",
+    "e2e:install": "playwright install chromium",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.7.1",
+    "pmtiles": "^3.2.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}

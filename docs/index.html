@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OPFS + Service Worker でベクトルタイルをローカルキャッシュ (PoC)</title>
+    <link
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: system-ui, sans-serif;
+      }
+      #map {
+        position: absolute;
+        inset: 0;
+      }
+      #panel {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 280px;
+        padding: 12px 14px;
+        background: rgba(255, 255, 255, 0.94);
+        border-radius: 10px;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      #panel h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      #panel label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+      #panel select,
+      #panel button {
+        width: 100%;
+        padding: 6px 8px;
+        font-size: 13px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        background: #fff;
+        cursor: pointer;
+      }
+      #panel button {
+        margin-top: 6px;
+        background: #f3f4f6;
+      }
+      #panel button:hover {
+        background: #e5e7eb;
+      }
+      .stats {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #e5e7eb;
+      }
+      .stats b {
+        font-variant-numeric: tabular-nums;
+      }
+      #status {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #555;
+      }
+      #status.ok {
+        color: #15803d;
+      }
+      #status.warn {
+        color: #b45309;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div id="panel">
+      <h1>OPFS タイルキャッシュ PoC</h1>
+
+      <label for="style">スタイル</label>
+      <select id="style">
+        <option value="https://z.yuiseki.net/static/maps/styles/osm-bright.json">
+          OSM Bright
+        </option>
+        <option value="https://z.yuiseki.net/static/maps/styles/osm-fiord.json">
+          OSM Fiord
+        </option>
+      </select>
+
+      <div class="stats">
+        OPFS キャッシュ(アクセスした範囲のみ):<br />
+        ブロック数 <b id="blocks">-</b><br />
+        サイズ <b id="size">-</b><br />
+        <button id="refresh">統計を更新</button>
+        <button id="clear">キャッシュを全消去</button>
+      </div>
+
+      <div id="status">Service Worker 準備中…</div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

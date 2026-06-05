@@ -1,0 +1,9 @@
+node_modules/
+
+# Playwright
+/test-results/
+/playwright-report/
+/.playwright/
+
+# 注意: docs/main.js と docs/sw.js はビルド成果物だが、
+# GitHub Pages がそのまま配信するためコミットする(ignore しない)。
