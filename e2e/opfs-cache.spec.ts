@@ -161,6 +161,38 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
       .toMatch(/^\d+\s*ms$/);
   });
 
+  test("SW 未制御(ハードリロード相当)でも 準備中… で固まらず起動する", async ({ page }) => {
+    // controller を null 固定 & controllerchange を抑止して、
+    // ハードリロード時(SW 制御対象外)の状態を再現する。
+    await page.addInitScript(() => {
+      const c = navigator.serviceWorker;
+      try {
+        Object.defineProperty(c, "controller", { get: () => null });
+      } catch {
+        /* 環境により失敗しても続行 */
+      }
+      const orig = c.addEventListener.bind(c);
+      // @ts-expect-error テスト用に上書き
+      c.addEventListener = (type, listener, opts) => {
+        if (type === "controllerchange") return;
+        return orig(type, listener as EventListener, opts);
+      };
+    });
+
+    await page.goto("/");
+
+    // 地図が初期化される(= 準備中… で止まっていない)
+    await page.waitForFunction(
+      () => (window as unknown as { __map?: { loaded(): boolean } }).__map?.loaded(),
+      null,
+      { timeout: 30_000 }
+    );
+
+    const status = (await page.locator("#status").textContent()) ?? "";
+    expect(status).not.toContain("準備中");
+    expect(status).toContain("未制御");
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

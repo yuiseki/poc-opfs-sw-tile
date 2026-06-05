@@ -32,14 +32,26 @@ async function ensureServiceWorker(): Promise<boolean> {
 
   if (navigator.serviceWorker.controller) return true;
 
-  // clients.claim() による制御開始(controllerchange)を待つ
-  await new Promise<void>((resolve) =>
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      () => resolve(),
-      { once: true }
-    )
-  );
+  // clients.claim() による制御開始(controllerchange)を待つ。
+  // ただしハードリロード時はそのページが SW の制御対象外となり
+  // controllerchange が発火しない。永久待ちを避けるためタイムアウトで先へ進む
+  // (この読み込みは未制御=未キャッシュだが、地図自体は表示される)。
+  await new Promise<void>((resolve) => {
+    const onChange = () => {
+      cleanup();
+      resolve();
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, 1500);
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+    };
+    navigator.serviceWorker.addEventListener("controllerchange", onChange);
+  });
+
   return true;
 }
 
@@ -182,6 +194,15 @@ void (async () => {
   setupCacheToggle();
   initMap();
   void updateStats();
+
+  // ハードリロード等で SW 未制御のまま起動した場合は明示する
+  // (initMap が "準備完了" をセットした後に上書き)
+  if (!navigator.serviceWorker.controller) {
+    setStatus(
+      "SW 未制御で起動(ハードリロード?)。通常リロードでキャッシュが有効になります。",
+      "warn"
+    );
+  }
 })();
 
 export {}; // モジュール化のため
