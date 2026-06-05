@@ -101,12 +101,20 @@ sw.addEventListener("message", (event) => {
   if (data?.type === "set-cache") {
     event.waitUntil(saveCacheEnabled(!!data.enabled));
   } else if (data?.type === "debug-net-count") {
-    // 診断用: ネットワーク取得回数と、観測された同時取得数の最大を返す
-    event.ports[0]?.postMessage({
-      count: networkBlockFetches,
-      peak: peakConcurrentFetches,
-      memHits,
-    });
+    // 診断用: 各種カウンタを返す
+    const port = event.ports[0];
+    event.waitUntil(
+      (async () => {
+        const known = cachedBlocksPromise ? await cachedBlocksPromise : null;
+        port?.postMessage({
+          count: networkBlockFetches,
+          peak: peakConcurrentFetches,
+          memHits,
+          opfsReads,
+          cachedBlocks: known ? known.size : 0,
+        });
+      })()
+    );
   }
 });
 
@@ -255,8 +263,32 @@ function putMemBlock(idx: number, data: Uint8Array): void {
   }
 }
 
+// OPFS に存在するブロック番号の索引。起動後に一度だけディレクトリを走査して作る。
+// これにより、未キャッシュブロックで getFileHandle が毎回 reject する経路を避けられ、
+// 「存在しない」判定が Set の参照だけで済む。
+let cachedBlocksPromise: Promise<Set<number>> | null = null;
+
+function getCachedBlocks(dir: FileSystemDirectoryHandle): Promise<Set<number>> {
+  if (!cachedBlocksPromise) cachedBlocksPromise = scanCachedBlocks(dir);
+  return cachedBlocksPromise;
+}
+
+async function scanCachedBlocks(
+  dir: FileSystemDirectoryHandle
+): Promise<Set<number>> {
+  const set = new Set<number>();
+  for await (const [name, handle] of dir as unknown as AsyncIterable<
+    [string, FileSystemHandle]
+  >) {
+    if (handle.kind === "file" && /^\d+$/.test(name)) set.add(Number(name));
+  }
+  return set;
+}
+
 // 診断用: 実際にネットワークへ出たブロック取得の回数(dedup が効いているかの検証に使う)
 let networkBlockFetches = 0;
+// 診断用: OPFS への読み取りを試みた回数(索引でスキップできているかの検証に使う)
+let opfsReads = 0;
 
 // 同時に走るネットワーク取得の上限。MapLibre は多数のタイルを一斉に要求するため、
 // 上限を設けないと上流リクエストと OPFS 書き込みが一気に集中する。8〜16 が目安。
@@ -289,11 +321,16 @@ async function acquireBlock(
   const mem = getMemBlock(idx);
   if (mem) return mem;
 
-  // 1) OPFS にあれば返し、メモリにも載せる
-  const cached = await readBlock(dir, idx);
-  if (cached) {
-    putMemBlock(idx, cached);
-    return cached;
+  // 1) 索引に存在するブロックだけ OPFS から読む(未キャッシュは読み取りを試みない)
+  const known = await getCachedBlocks(dir);
+  if (known.has(idx)) {
+    const cached = await readBlock(dir, idx);
+    if (cached) {
+      putMemBlock(idx, cached);
+      return cached;
+    }
+    // 索引にはあるが実体が無い(消去された等) -> 整合を取り、取得し直す
+    known.delete(idx);
   }
 
   // 2) 同じブロックを取得中なら、その Promise に相乗りする(二重取得を防ぐ)
@@ -344,6 +381,7 @@ async function fetchAndStoreBlock(
   const bytes = new Uint8Array(await resp.arrayBuffer());
   await writeBlock(dir, idx, bytes);
   putMemBlock(idx, bytes); // 取得直後の再要求に備えてメモリにも載せる
+  (await getCachedBlocks(dir)).add(idx); // 索引にも反映
   return bytes;
 }
 
@@ -358,6 +396,7 @@ async function readBlock(
   dir: FileSystemDirectoryHandle,
   idx: number
 ): Promise<Uint8Array | null> {
+  opfsReads++;
   try {
     const fh = await dir.getFileHandle(String(idx));
     const file = await fh.getFile();

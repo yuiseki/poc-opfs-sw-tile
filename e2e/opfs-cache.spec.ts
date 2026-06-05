@@ -349,6 +349,55 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(after.count - before.count).toBe(0); // ネットワーク取得は発生しない
   });
 
+  test("未キャッシュブロックは OPFS 読み取りを試みない (索引でスキップ)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    const stats = (): Promise<{ count: number; opfsReads: number }> =>
+      page.evaluate(
+        () =>
+          new Promise((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-net-count" },
+              [ch.port2]
+            );
+          })
+      );
+
+    // 地図のタイル読み込みが静止するまで待つ
+    let q = -1;
+    for (let i = 0; i < 25; i++) {
+      const c = (await stats()).count;
+      if (c === q) break;
+      q = c;
+      await page.waitForTimeout(400);
+    }
+
+    const before = await stats();
+
+    // 地図が触らない高オフセットの「新規」ブロックを 15 本要求する
+    await page.evaluate(async () => {
+      const url =
+        "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles";
+      await Promise.all(
+        Array.from({ length: 15 }, (_, i) => {
+          const s = 62_000_000 + i * 65536; // 各ブロックを 1 つずつずらす
+          return fetch(url, { headers: { Range: `bytes=${s}-${s + 50}` } });
+        })
+      );
+    });
+
+    const after = await stats();
+    // 15 個ともネットワークから取得され、
+    expect(after.count - before.count).toBe(15);
+    // OPFS 読み取り(getFileHandle)は 1 度も試みていない(索引で未キャッシュと判定)
+    expect(after.opfsReads - before.opfsReads).toBe(0);
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);
