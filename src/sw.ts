@@ -97,7 +97,11 @@ sw.addEventListener("activate", (event) => {
 
 // ページからの OPFS キャッシュ ON/OFF 切り替えを受け取る
 sw.addEventListener("message", (event) => {
-  const data = event.data as { type?: string; enabled?: boolean } | null;
+  const data = event.data as {
+    type?: string;
+    enabled?: boolean;
+    idx?: number;
+  } | null;
   if (data?.type === "set-cache") {
     event.waitUntil(saveCacheEnabled(!!data.enabled));
   } else if (data?.type === "debug-net-count") {
@@ -113,6 +117,25 @@ sw.addEventListener("message", (event) => {
           opfsReads,
           cachedBlocks: known ? known.size : 0,
         });
+      })()
+    );
+  } else if (data?.type === "debug-has-block") {
+    // 診断用: 指定ブロックが索引(cachedBlocks)と OPFS 実体に存在するかを返す
+    const idx = data.idx as number;
+    const port = event.ports[0];
+    event.waitUntil(
+      (async () => {
+        const known = cachedBlocksPromise ? await cachedBlocksPromise : null;
+        const inSet = known ? known.has(idx) : false;
+        let onDisk = false;
+        try {
+          const dir = await getCacheDir();
+          await dir.getFileHandle(String(idx));
+          onDisk = true;
+        } catch {
+          onDisk = false;
+        }
+        port?.postMessage({ inSet, onDisk });
       })()
     );
   }

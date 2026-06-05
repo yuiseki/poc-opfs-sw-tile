@@ -398,6 +398,50 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(after.opfsReads - before.opfsReads).toBe(0);
   });
 
+  test("取得した未キャッシュブロックが OPFS と cachedBlocks 索引の両方に載る", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    const BLOCK_SIZE = 64 * 1024;
+    const OFFSET = 63_000_000;
+    const IDX = Math.floor(OFFSET / BLOCK_SIZE); // このブロックを取得対象にする
+
+    const hasBlock = (
+      idx: number
+    ): Promise<{ inSet: boolean; onDisk: boolean }> =>
+      page.evaluate(
+        (i) =>
+          new Promise((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-has-block", idx: i },
+              [ch.port2]
+            );
+          }),
+        idx
+      );
+
+    // 取得前: 索引にも OPFS 実体にも存在しない
+    const before = await hasBlock(IDX);
+    expect(before.inSet).toBe(false);
+    expect(before.onDisk).toBe(false);
+
+    // 未キャッシュブロックを 1 つ取得する
+    await page.evaluate(async (offset) => {
+      const url =
+        "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles";
+      await fetch(url, { headers: { Range: `bytes=${offset}-${offset + 50}` } });
+    }, OFFSET);
+
+    // 取得後: OPFS に保存され、かつ cachedBlocks 索引にも登録されている
+    const after = await hasBlock(IDX);
+    expect(after.onDisk).toBe(true);
+    expect(after.inSet).toBe(true);
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);
