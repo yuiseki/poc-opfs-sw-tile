@@ -303,6 +303,49 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     expect(after - base).toBe(1);
   });
 
+  test("連続ブロックを跨ぐ 1 リクエストはまとめて 1 回の fetch になる (coalescing)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    const netCount = (): Promise<number> =>
+      page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => resolve(e.data.count as number);
+            navigator.serviceWorker.controller?.postMessage(
+              { type: "debug-net-count" },
+              [ch.port2]
+            );
+          })
+      );
+
+    // 取得が静止するまで待つ
+    let base = -1;
+    for (let i = 0; i < 25; i++) {
+      const c = await netCount();
+      if (c === base) break;
+      base = c;
+      await page.waitForTimeout(400);
+    }
+
+    // 未キャッシュの 4 ブロック(64KB×4)を跨ぐ単一 Range を 1 本要求する
+    // 64000000..64200000 は block 976..979 にまたがる(計 200001 バイト)。
+    const len = await page.evaluate(async () => {
+      const url =
+        "https://z.yuiseki.net/static/openstreetmap/planet/planet.pmtiles";
+      const r = await fetch(url, { headers: { Range: "bytes=64000000-64200000" } });
+      return (await r.arrayBuffer()).byteLength;
+    });
+
+    const after = await netCount();
+    // 4 ブロック分が正しく組み立てられ、ネットワークは 1 リクエストだけ(まとめ取り)
+    expect(len).toBe(200001);
+    expect(after - base).toBe(1);
+  });
+
   test("同時ネットワーク取得数が上限(12)を超えない", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

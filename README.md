@@ -117,6 +117,7 @@ npm test
 3. オフラインにしてリロードしても、アプリシェル + OPFS から地図を復元できること
 3b. 低速回線でもアプリシェルがキャッシュから即起動すること（ネットワークを待たない）
 4. 同一ブロックへの同時要求が 1 回の fetch に集約されること（inFlight）
+4b. 連続ブロックを跨ぐ単一リクエストが 1 回の fetch にまとまること（coalescing）
 5. 同時ネットワーク取得数が上限(12)を超えないこと（セマフォ）
 6. 二度目の同一ブロック要求がメモリキャッシュから返ること（OPFS/ネットワーク不要）
 7. 未キャッシュブロックで OPFS 読み取りを試みないこと（索引でスキップ）
@@ -126,14 +127,15 @@ npm test
 ## 技術メモ
 
 - **OPFS の書き込みは Service Worker から async API (`createWritable`) で行う**。同期 API (`createSyncAccessHandle`) は専用 Worker 限定で SW では使えない。
-- ブロックは固定長 (64KB) に整列。各ブロックは 1 回の Range リクエストで取得する。
+- ブロックは固定長 (64KB) に整列。
+- **連続ブロックのまとめ取り (coalescing)**: 1 つの Range リクエストが複数ブロックを跨ぐ場合、連続する未キャッシュブロックを **1 回の Range リクエスト**でまとめて取得する（`fetchRun()`）。高遅延回線での往復回数を減らす。途中にキャッシュ済みブロックがあれば run を切るので過剰取得しない。
 - **OPFS 読み取りは並列**。`ensureBlocks` は必要ブロックを `Promise.all` で同時に読む（逐次 `await` しない）。
-- **メモリ内ブロックキャッシュ (簡易 LRU)**: SW 生存中だけ、最近読んだブロックを `Map<blockIndex, Uint8Array>` に保持（`MEM_MAX_BLOCKS=512` ≒ 32MiB）。`getFileHandle→getFile→arrayBuffer` の OPFS 経路を毎回辿らずに済むため、ホットなブロック（ヘッダ・ディレクトリ・近接タイル）の再読み出しが速い。`acquireBlock()` はメモリ→OPFS→ネットワークの順に当たる。
+- **メモリ内ブロックキャッシュ (簡易 LRU)**: SW 生存中だけ、最近読んだブロックを `Map<blockIndex, Uint8Array>` に保持（`MEM_MAX_BLOCKS=512` ≒ 32MiB）。`getFileHandle→getFile→arrayBuffer` の OPFS 経路を毎回辿らずに済むため、ホットなブロック（ヘッダ・ディレクトリ・近接タイル）の再読み出しが速い。`ensureBlocks()` はメモリ→OPFS→ネットワークの順に当たる。
 - **読み取りは 3 段（メモリ → OPFS → ネットワーク）**。各段の最速で解決する。
   - **真の memory-only**: OPFS ディレクトリ取得 (`getCacheDir`) はリクエストごとに**遅延化**してあり、全ブロックがメモリヒットするリクエストでは OPFS にも Cache Storage にも一切触れない（`getDir` は最初に OPFS が必要になった時だけ呼ばれる）。
   - **ネットワーク段は「即応答＋非同期永続化」**: fetch で得たバイト列はメモリに載せてすぐ応答を返し、OPFS への**ブロック書き込みと索引登録はレスポンス経路から外して背後で実行**（`persistBlock` を fire-and-forget）。応答が OPFS 書き込みを待たない。
 - **OPFS ブロック索引 (cachedBlocks Set)**: 起動後に一度だけディレクトリを走査し、存在するブロック番号を `Set<number>` に保持する。未キャッシュブロックでは OPFS の読み取り(`getFileHandle` の reject)を試みずに済み、即ネットワーク取得へ回せる。取得・消去に応じて索引を更新し、索引にあるのに実体が無い場合は整合を取って取得し直す。
-- **同時 Range 要求の重複取得防止 (inFlight Map)**: MapLibre は同時に多数のタイルを要求し、近接タイルが同じ内部範囲(=同じブロック)を要求しうる。`Map<blockIndex, Promise>` で「取得中」の Promise をブロック単位で共有し、同一ブロックの二重 fetch / 二重 write を防ぐ。`acquireBlock()` が起点。
+- **同時 Range 要求の重複取得防止 (inFlight Map)**: MapLibre は同時に多数のタイルを要求し、近接タイルが同じ内部範囲(=同じブロック)を要求しうる。`Map<blockIndex, Promise>` で「取得中」の Promise をブロック単位で共有し、同一ブロックの二重 fetch / 二重 write を防ぐ。まとめ取り (run) も run 内の各ブロックを inFlight に登録するので、別リクエストとの重複も防げる。`fetchMissing()` が起点。
 - **同時ネットワーク取得数の上限 (セマフォ)**: 上流リクエストと OPFS 書き込みの集中を避けるため、実ネットワーク取得の同時実行を `MAX_CONCURRENT_FETCHES`(=12) に制限する。キャッシュ済みブロックの読み出しは上限の対象外（即返す）。
 - 総ファイルサイズは最初の `Content-Range` レスポンスから学習し、**メモリ変数 (`totalSizeCache`) に保持**して Range レスポンスのたびに OPFS を読まない。`meta.json` への永続化は**レスポンス経路から外して fire-and-forget**（メモリ値で即応答し、書き込みは待たない）。
 - **アプリシェル (index.html / main.js) は stale-while-revalidate**。キャッシュがあれば即返して起動し（**回線品質に依存しない高速なリロード**）、同時に背後でネットワーク取得してキャッシュを更新する。低速・不安定回線（例: 移動中のモバイル）でもリロードがネットワークを待たない。デプロイした新しいコードは**次回リロードで反映**される（cache-first の「旧版が残り続ける」も network-first の「毎回ネットワーク待ち」も避ける中間策）。キャッシュ未保有の初回のみネットワークを待ち、失敗時はプリキャッシュ済み index.html へフォールバック。

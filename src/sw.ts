@@ -111,7 +111,7 @@ sw.addEventListener("message", (event) => {
       (async () => {
         const known = cachedBlocksPromise ? await cachedBlocksPromise : null;
         port?.postMessage({
-          count: networkBlockFetches,
+          count: networkFetches,
           peak: peakConcurrentFetches,
           memHits,
           opfsReads,
@@ -235,26 +235,51 @@ async function handlePmtiles(request: Request): Promise<Response> {
 }
 
 /**
- * firstBlock..lastBlock の各ブロックを並行取得して Map<blockIndex, Uint8Array> で返す。
- * 取得は acquireBlock 経由で行うため、同じブロックへの同時要求は 1 回の fetch に集約される。
+ * firstBlock..lastBlock のブロックを集めて Map<blockIndex, Uint8Array> で返す。
+ *  - メモリ → OPFS → ネットワークの順に当たる。
+ *  - 全ブロックがメモリヒットなら OPFS には一切触れない。
+ *  - 不足ブロックは「連続範囲ごとにまとめて」1 回の Range で取得する(往復削減)。
  */
 async function ensureBlocks(
   getDir: () => Promise<FileSystemDirectoryHandle>,
   firstBlock: number,
   lastBlock: number
 ): Promise<Map<number, Uint8Array>> {
-  const blocks = new Map<number, Uint8Array>();
-  const indices: number[] = [];
-  for (let b = firstBlock; b <= lastBlock; b++) indices.push(b);
+  const result = new Map<number, Uint8Array>();
 
+  // 1) メモリ。全てメモリにあれば OPFS には触れない。
+  const needDisk: number[] = [];
+  for (let b = firstBlock; b <= lastBlock; b++) {
+    const mem = getMemBlock(b);
+    if (mem) result.set(b, mem);
+    else needDisk.push(b);
+  }
+  if (needDisk.length === 0) return result;
+
+  // 2) OPFS。索引にあるものだけ読み、無いものは取得対象に回す。
+  const dir = await getDir();
+  const known = await getCachedBlocks(dir);
+  const toFetch: number[] = [];
   await Promise.all(
-    indices.map(async (b) => {
-      const data = await acquireBlock(getDir, b);
-      if (data) blocks.set(b, data);
+    needDisk.map(async (b) => {
+      if (known.has(b)) {
+        const cached = await readBlock(dir, b);
+        if (cached) {
+          putMemBlock(b, cached);
+          result.set(b, cached);
+          return;
+        }
+        known.delete(b); // 索引にあるが実体が無い -> 取得し直す
+      }
+      toFetch.push(b);
     })
   );
+  if (toFetch.length === 0) return result;
 
-  return blocks;
+  // 3) ネットワーク。連続ブロックはまとめて取得(inFlight で二重取得は防ぐ)。
+  const fetched = await fetchMissing(dir, toFetch);
+  for (const [b, data] of fetched) if (data) result.set(b, data);
+  return result;
 }
 
 // 取得中ブロックの共有 Promise。
@@ -312,8 +337,9 @@ async function scanCachedBlocks(
   return set;
 }
 
-// 診断用: 実際にネットワークへ出たブロック取得の回数(dedup が効いているかの検証に使う)
-let networkBlockFetches = 0;
+// 診断用: 実際にネットワークへ出た取得リクエストの回数。
+// 連続ブロックは 1 回にまとまるため、これは「ブロック数」ではなく「リクエスト数」。
+let networkFetches = 0;
 // 診断用: OPFS への読み取りを試みた回数(索引でスキップできているかの検証に使う)
 let opfsReads = 0;
 
@@ -340,78 +366,108 @@ function releaseFetchSlot(): void {
   else activeFetches--;
 }
 
-async function acquireBlock(
-  getDir: () => Promise<FileSystemDirectoryHandle>,
-  idx: number
-): Promise<Uint8Array | null> {
-  // 0) メモリキャッシュにあれば最速で返す(OPFS には一切触れない)
-  const mem = getMemBlock(idx);
-  if (mem) return mem;
+// 不足ブロック集合を取得して Map<block, bytes|null> を返す。
+//  - 既に取得中(inFlight)のブロックはその Promise に相乗り(二重取得を防ぐ)。
+//  - それ以外の「連続するブロック」はまとめて 1 回の Range リクエストで取得する
+//    (高遅延回線での往復回数を減らす)。
+async function fetchMissing(
+  dir: FileSystemDirectoryHandle,
+  blocks: number[]
+): Promise<Map<number, Uint8Array | null>> {
+  const sorted = [...new Set(blocks)].sort((a, b) => a - b);
+  const waits: Array<[number, Promise<Uint8Array | null>]> = [];
 
-  // 1) ここで初めて OPFS ディレクトリを取得する。索引に存在するブロックだけ読む
-  //    (未キャッシュは getFileHandle の reject 経路を踏まない)。
-  const dir = await getDir();
-  const known = await getCachedBlocks(dir);
-  if (known.has(idx)) {
-    const cached = await readBlock(dir, idx);
-    if (cached) {
-      putMemBlock(idx, cached);
-      return cached;
+  // 注意: この while ループ内には await を入れない。run を決めて inFlight に登録するまでを
+  // 同期的に行うことで、同時に走る別リクエストとの二重登録(=二重 fetch)を防ぐ。
+  let i = 0;
+  while (i < sorted.length) {
+    const existing = inFlight.get(sorted[i]);
+    if (existing) {
+      waits.push([sorted[i], existing]);
+      i++;
+      continue;
     }
-    // 索引にはあるが実体が無い(消去された等) -> 整合を取り、取得し直す
-    known.delete(idx);
+    // 取得中でない「連続ブロック」をまとめて run にする
+    let j = i;
+    while (
+      j + 1 < sorted.length &&
+      sorted[j + 1] === sorted[j] + 1 &&
+      !inFlight.has(sorted[j + 1])
+    ) {
+      j++;
+    }
+    const s = sorted[i];
+    const e = sorted[j];
+    registerRun(dir, s, e); // s..e の取得 Promise を inFlight に同期登録
+    for (let b = s; b <= e; b++) waits.push([b, inFlight.get(b)!]);
+    i = j + 1;
   }
 
-  // 2) 同じブロックを取得中なら、その Promise に相乗りする(二重取得を防ぐ)
-  const existing = inFlight.get(idx);
-  if (existing) return existing;
+  const out = new Map<number, Uint8Array | null>();
+  await Promise.all(waits.map(async ([b, p]) => out.set(b, await p)));
+  return out;
+}
 
-  // 3) 自分が取得を担当する。完了するまで他の要求は (2) で待つ。
-  //    inFlight への登録は同期的に行い(相乗りを成立させる)、実 fetch は
-  //    同時実行数の上限(セマフォ)内で走らせる。
-  const task = (async () => {
-    await acquireFetchSlot();
-    try {
-      return await fetchAndStoreBlock(dir, idx);
-    } finally {
-      releaseFetchSlot();
-    }
-  })();
-  inFlight.set(idx, task);
-  try {
-    return await task;
-  } finally {
-    inFlight.delete(idx);
+// 連続ブロック s..e(全て未取得)を 1 回の fetch でまとめ取りし、各ブロックの取得 Promise を
+// inFlight に同期的に登録する。完了/失敗後に inFlight から取り除く。
+function registerRun(
+  dir: FileSystemDirectoryHandle,
+  s: number,
+  e: number
+): void {
+  const run = fetchRun(dir, s, e); // Promise<Map<block, bytes>>
+  for (let b = s; b <= e; b++) {
+    const block = b;
+    const p = run.then((m) => m.get(block) ?? null);
+    inFlight.set(block, p);
+    const cleanup = (): void => {
+      if (inFlight.get(block) === p) inFlight.delete(block);
+    };
+    p.then(cleanup, cleanup); // 解決・失敗どちらでも除去(失敗も観測=未処理拒否を防ぐ)
   }
 }
 
-async function fetchAndStoreBlock(
+// 連続ブロック [s, e] を 1 リクエストで取得し、ブロックに分割してメモリへ載せる。
+// OPFS への永続化は背後で行う(レスポンスを待たせない)。Map<block, bytes> を返す。
+async function fetchRun(
   dir: FileSystemDirectoryHandle,
-  idx: number
-): Promise<Uint8Array | null> {
-  const start = idx * BLOCK_SIZE;
-  const end = start + BLOCK_SIZE - 1; // 終端越えはサーバが 206 でクランプ
-  networkBlockFetches++;
-  const resp = await fetch(PMTILES_URL, {
-    headers: { Range: `bytes=${start}-${end}` },
-  });
-  if (resp.status === 416) return null; // 範囲外(EOF 越え)
-  if (!resp.ok && resp.status !== 206) {
-    throw new Error(`upstream range fetch failed: ${resp.status}`);
-  }
+  s: number,
+  e: number
+): Promise<Map<number, Uint8Array>> {
+  const map = new Map<number, Uint8Array>();
+  await acquireFetchSlot();
+  try {
+    const start = s * BLOCK_SIZE;
+    const end = (e + 1) * BLOCK_SIZE - 1; // 終端越えはサーバが 206 でクランプ
+    networkFetches++;
+    const resp = await fetch(PMTILES_URL, {
+      headers: { Range: `bytes=${start}-${end}` },
+    });
+    if (resp.status === 416) return map; // 範囲外(EOF 越え)
+    if (!resp.ok && resp.status !== 206) {
+      throw new Error(`upstream range fetch failed: ${resp.status}`);
+    }
 
-  // 総サイズを学習(メモリ即時更新 / OPFS 永続化は待たない)
-  const cr = resp.headers.get("Content-Range");
-  if (cr && cr.includes("/")) {
-    const total = cr.split("/")[1].trim();
-    if (total && total !== "*") setTotal(dir, total);
-  }
+    // 総サイズを学習(メモリ即時更新 / OPFS 永続化は待たない)
+    const cr = resp.headers.get("Content-Range");
+    if (cr && cr.includes("/")) {
+      const total = cr.split("/")[1].trim();
+      if (total && total !== "*") setTotal(dir, total);
+    }
 
-  const bytes = new Uint8Array(await resp.arrayBuffer());
-  // メモリには即載せて応答を返し、OPFS への永続化(書き込み + 索引登録)は待たない。
-  putMemBlock(idx, bytes);
-  void persistBlock(dir, idx, bytes);
-  return bytes;
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    for (let b = s; b <= e; b++) {
+      const off = (b - s) * BLOCK_SIZE;
+      if (off >= buf.length) break; // これ以降は EOF 越え
+      const slice = buf.slice(off, Math.min(off + BLOCK_SIZE, buf.length));
+      map.set(b, slice);
+      putMemBlock(b, slice); // メモリには即載せる
+      void persistBlock(dir, b, slice); // OPFS 永続化は背後で
+    }
+    return map;
+  } finally {
+    releaseFetchSlot();
+  }
 }
 
 // OPFS へのブロック永続化と索引登録(レスポンス経路から外して背後で実行)。
