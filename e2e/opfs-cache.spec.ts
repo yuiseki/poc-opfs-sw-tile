@@ -134,6 +134,33 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     await expect.poll(xCache, { timeout: 10_000 }).toBe("OPFS");
   });
 
+  test("再描画(movestart→idle)の所要時間がパネルに表示される", async ({ page }) => {
+    await page.goto("/");
+    await waitForController(page);
+
+    // 地図(と __map)の準備を待つ
+    await page.waitForFunction(
+      () => (window as unknown as { __map?: { loaded(): boolean } }).__map?.loaded(),
+      null,
+      { timeout: 30_000 }
+    );
+
+    // ズームインして再描画を発生させる
+    await page.evaluate(() => {
+      const m = (window as unknown as {
+        __map: { getZoom(): number; zoomTo(z: number): void };
+      }).__map;
+      m.zoomTo(m.getZoom() + 2);
+    });
+
+    // "NNN ms" が表示される
+    await expect
+      .poll(async () => (await page.locator("#render").textContent()) ?? "", {
+        timeout: 30_000,
+      })
+      .toMatch(/^\d+\s*ms$/);
+  });
+
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
     await page.goto("/");
     await waitForController(page);

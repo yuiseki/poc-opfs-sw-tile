@@ -139,9 +139,31 @@ function initMap(): void {
     timer = window.setTimeout(updateStats, 400);
   });
 
+  // 再描画にかかった時間を計測する。
+  //   movestart : ズーム/パン等の再描画開始
+  //   idle      : カメラ停止 + 必要タイル全ロード + 描画完了の確定シグナル
+  // この差分(ms)を表示する。OPFS キャッシュの有無で通信支配分の差が見える。
+  let renderT0 = 0;
+  let measuring = false;
+  map.on("movestart", () => {
+    if (measuring) return;
+    measuring = true;
+    renderT0 = performance.now();
+    $("render").textContent = "計測中…";
+  });
+  map.on("idle", () => {
+    if (!measuring) return;
+    measuring = false;
+    const ms = performance.now() - renderT0;
+    $("render").textContent = `${Math.round(ms)} ms`;
+  });
+
   styleSelect.addEventListener("change", () => {
     map.setStyle(styleSelect.value);
   });
+
+  // デバッグ / E2E 用にマップを公開
+  (window as unknown as { __map: maplibregl.Map }).__map = map;
 
   setStatus("準備完了。地図を動かした範囲だけが OPFS に保存されます。", "ok");
 }

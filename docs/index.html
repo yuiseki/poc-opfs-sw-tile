@@ -74,8 +74,17 @@
         padding-top: 10px;
         border-top: 1px solid #e5e7eb;
       }
-      .stats b {
+      .stats b,
+      .perf b {
         font-variant-numeric: tabular-nums;
+      }
+      .perf {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #e5e7eb;
+      }
+      .perf b {
+        font-size: 15px;
       }
       #status {
         margin-top: 8px;
@@ -110,6 +119,11 @@
         <input type="checkbox" id="cache-toggle" checked />
         OPFS キャッシュを使う
       </label>
+
+      <div class="perf">
+        直近の再描画(movestart→idle):<br />
+        <b id="render">-</b>
+      </div>
 
       <div class="stats">
         OPFS キャッシュ(アクセスした範囲のみ):<br />
