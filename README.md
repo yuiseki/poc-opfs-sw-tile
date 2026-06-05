@@ -131,6 +131,6 @@ npm test
 - **OPFS ブロック索引 (cachedBlocks Set)**: 起動後に一度だけディレクトリを走査し、存在するブロック番号を `Set<number>` に保持する。未キャッシュブロックでは OPFS の読み取り(`getFileHandle` の reject)を試みずに済み、即ネットワーク取得へ回せる。取得・消去に応じて索引を更新し、索引にあるのに実体が無い場合は整合を取って取得し直す。
 - **同時 Range 要求の重複取得防止 (inFlight Map)**: MapLibre は同時に多数のタイルを要求し、近接タイルが同じ内部範囲(=同じブロック)を要求しうる。`Map<blockIndex, Promise>` で「取得中」の Promise をブロック単位で共有し、同一ブロックの二重 fetch / 二重 write を防ぐ。`acquireBlock()` が起点。
 - **同時ネットワーク取得数の上限 (セマフォ)**: 上流リクエストと OPFS 書き込みの集中を避けるため、実ネットワーク取得の同時実行を `MAX_CONCURRENT_FETCHES`(=12) に制限する。キャッシュ済みブロックの読み出しは上限の対象外（即返す）。
-- 総ファイルサイズは最初の `Content-Range` レスポンスから学習し `meta.json` に保存（`Content-Range` ヘッダの組み立てに使用）。
+- 総ファイルサイズは最初の `Content-Range` レスポンスから学習し、**メモリ変数 (`totalSizeCache`) に保持**して Range レスポンスのたびに OPFS を読まない。`meta.json` への永続化は**レスポンス経路から外して fire-and-forget**（メモリ値で即応答し、書き込みは待たない）。
 - **アプリシェル (index.html / main.js) は network-first**。オンライン時は常に最新を取得するため、デプロイした新しいコードが確実に反映される（cache-first だと旧 SW / 旧 JS が残り続ける）。オフライン時のみプリキャッシュにフォールバック。
 - **SW の更新**: `skipWaiting` + `clients.claim` で即時有効化し、登録は `updateViaCache: 'none'`。新しい SW が制御を引き継いだら（更新時のみ）ページを 1 度だけ自動リロードして新しい資産を読み込む。`activate` 時に旧バージョンのキャッシュを削除する。OPFS のタイルキャッシュは更新で消さず引き継ぐ。

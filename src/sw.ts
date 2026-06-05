@@ -210,7 +210,7 @@ async function handlePmtiles(request: Request): Promise<Response> {
       );
     }
 
-    const total = (await readTotal(dir)) ?? "*";
+    const total = await getTotal(dir);
 
     return new Response(out, {
       status: 206,
@@ -394,11 +394,11 @@ async function fetchAndStoreBlock(
     throw new Error(`upstream range fetch failed: ${resp.status}`);
   }
 
-  // 総サイズを学習して保存(Content-Range: bytes s-e/total)
+  // 総サイズを学習(メモリ即時更新 / OPFS 永続化は待たない)
   const cr = resp.headers.get("Content-Range");
   if (cr && cr.includes("/")) {
     const total = cr.split("/")[1].trim();
-    if (total && total !== "*") await writeTotal(dir, total);
+    if (total && total !== "*") setTotal(dir, total);
   }
 
   const bytes = new Uint8Array(await resp.arrayBuffer());
@@ -442,35 +442,43 @@ async function writeBlock(
   await w.close();
 }
 
-// 総サイズはセッション中変わらないので一度だけ書き、以降はメモリから返す。
-// (並行ブロック取得で writeTotal が多重に呼ばれても meta.json への書き込み競合を避ける)
-let knownTotal: string | null = null;
+// PMTiles の総バイト数(Content-Range の組み立て用)。セッション中は変わらないので
+// 一度分かればメモリ変数に保持し、Range レスポンスのたびに OPFS を読まない。
+let totalSizeCache: string | null = null;
 
-async function readTotal(
-  dir: FileSystemDirectoryHandle
-): Promise<string | null> {
-  if (knownTotal !== null) return knownTotal;
+// レスポンス経路で使う: メモリにあれば即返し、無ければ OPFS から一度だけ読む。
+async function getTotal(dir: FileSystemDirectoryHandle): Promise<string> {
+  if (totalSizeCache !== null) return totalSizeCache;
   try {
     const fh = await dir.getFileHandle("meta.json");
     const file = await fh.getFile();
-    knownTotal = (JSON.parse(await file.text()) as { totalSize: string })
+    totalSizeCache = (JSON.parse(await file.text()) as { totalSize: string })
       .totalSize;
   } catch {
-    knownTotal = null;
+    /* 未学習。"*" を返すがキャッシュは汚さない(後で setTotal が入れる) */
   }
-  return knownTotal;
+  return totalSizeCache ?? "*";
 }
 
-async function writeTotal(
+// 総サイズを学習: メモリは即時更新し、OPFS への永続化は待たない(レスポンスを止めない)。
+function setTotal(dir: FileSystemDirectoryHandle, total: string): void {
+  if (totalSizeCache === total) return; // 既知なら何もしない(重複書き込みも防ぐ)
+  totalSizeCache = total;
+  void persistTotal(dir, total); // fire-and-forget(失敗してもメモリ値で動作)
+}
+
+async function persistTotal(
   dir: FileSystemDirectoryHandle,
   total: string
 ): Promise<void> {
-  if (knownTotal === total) return; // 既知なら書かない(無駄な書き込み競合を避ける)
-  knownTotal = total;
-  const fh = await dir.getFileHandle("meta.json", { create: true });
-  const w = await fh.createWritable();
-  await w.write(JSON.stringify({ totalSize: total }));
-  await w.close();
+  try {
+    const fh = await dir.getFileHandle("meta.json", { create: true });
+    const w = await fh.createWritable();
+    await w.write(JSON.stringify({ totalSize: total }));
+    await w.close();
+  } catch {
+    /* 永続化失敗は無視(次回取得時に再学習される) */
+  }
 }
 
 // -------------------- 静的アセットの cache-first --------------------
