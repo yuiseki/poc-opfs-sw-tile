@@ -175,27 +175,51 @@ function initMap(): void {
   // スマホで長くスワイプしても #render-move は実際の描画分だけになり、誤解を防ぐ。
   // 初回(リロード直後)は #render に「ナビゲーション開始 → 最初の idle」を表示。
   let gestureStart = 0;
-  let lastMoveEnd = 0;
+  let lastMove = 0; // 最後にカメラが動いた時刻(move / moveend で更新)
   let measuring = false;
   let firstIdleSeen = false;
+
+  // 診断用: 各イベントの発火回数を表示(実機で発火しているか確認するため)
+  let cStart = 0;
+  let cMove = 0;
+  let cEnd = 0;
+  let cIdle = 0;
+  const updateEv = (): void => {
+    $("evlog").textContent =
+      `イベント start:${cStart} move:${cMove} end:${cEnd} idle:${cIdle}`;
+  };
+  updateEv();
+
   map.on("movestart", () => {
+    cStart++;
+    updateEv();
     if (measuring) return;
     measuring = true;
     gestureStart = performance.now();
-    lastMoveEnd = 0;
+    lastMove = gestureStart;
     $("render").textContent = "計測中…";
     $("render-move").textContent = "計測中…";
   });
+  // move / moveend どちらでも「最後に動いた時刻」を更新する。
+  // moveend が idle より後になる環境でも、move で確実に時刻が取れるため - にならない。
+  map.on("move", () => {
+    cMove++;
+    if (measuring) lastMove = performance.now();
+  });
   map.on("moveend", () => {
-    if (measuring) lastMoveEnd = performance.now(); // 直近の「移動停止」時刻
+    cEnd++;
+    updateEv();
+    if (measuring) lastMove = performance.now();
   });
   map.on("idle", () => {
+    cIdle++;
+    updateEv();
     if (measuring) {
       measuring = false;
       const now = performance.now();
       $("render").textContent = `${Math.round(now - gestureStart)} ms`;
-      $("render-move").textContent =
-        lastMoveEnd > 0 ? `${Math.round(now - lastMoveEnd)} ms` : "-";
+      // 最後にカメラが動いてから描画完了まで(スワイプ時間を除いた実描画)
+      $("render-move").textContent = `${Math.round(now - lastMove)} ms`;
       return;
     }
     if (!firstIdleSeen) {
