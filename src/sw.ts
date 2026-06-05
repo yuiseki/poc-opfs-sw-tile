@@ -186,13 +186,17 @@ async function handlePmtiles(request: Request): Promise<Response> {
   if (!(await loadCacheEnabled())) return fetch(request);
 
   try {
-    const dir = await getCacheDir();
+    // OPFS ディレクトリは「実際に OPFS/ネットワークに触れる時」だけ取得する。
+    // 全ブロックがメモリヒットのリクエストでは getCacheDir すら呼ばれない(真の memory-only)。
+    let dirPromise: Promise<FileSystemDirectoryHandle> | undefined;
+    const getDir = (): Promise<FileSystemDirectoryHandle> =>
+      (dirPromise ??= getCacheDir());
 
     const firstBlock = Math.floor(start / BLOCK_SIZE);
     const lastBlock = Math.floor(end / BLOCK_SIZE);
 
     // 必要なブロックを OPFS から読み、無いものはネットワークから補充して保存
-    const blocks = await ensureBlocks(dir, firstBlock, lastBlock);
+    const blocks = await ensureBlocks(getDir, firstBlock, lastBlock);
 
     // 要求された [start, end] をブロック群から組み立てる
     const outLen = end - start + 1;
@@ -210,7 +214,7 @@ async function handlePmtiles(request: Request): Promise<Response> {
       );
     }
 
-    const total = await getTotal(dir);
+    const total = await getTotal(getDir);
 
     return new Response(out, {
       status: 206,
@@ -235,7 +239,7 @@ async function handlePmtiles(request: Request): Promise<Response> {
  * 取得は acquireBlock 経由で行うため、同じブロックへの同時要求は 1 回の fetch に集約される。
  */
 async function ensureBlocks(
-  dir: FileSystemDirectoryHandle,
+  getDir: () => Promise<FileSystemDirectoryHandle>,
   firstBlock: number,
   lastBlock: number
 ): Promise<Map<number, Uint8Array>> {
@@ -245,7 +249,7 @@ async function ensureBlocks(
 
   await Promise.all(
     indices.map(async (b) => {
-      const data = await acquireBlock(dir, b);
+      const data = await acquireBlock(getDir, b);
       if (data) blocks.set(b, data);
     })
   );
@@ -337,14 +341,16 @@ function releaseFetchSlot(): void {
 }
 
 async function acquireBlock(
-  dir: FileSystemDirectoryHandle,
+  getDir: () => Promise<FileSystemDirectoryHandle>,
   idx: number
 ): Promise<Uint8Array | null> {
-  // 0) メモリキャッシュにあれば最速で返す(OPFS アクセスを省略)
+  // 0) メモリキャッシュにあれば最速で返す(OPFS には一切触れない)
   const mem = getMemBlock(idx);
   if (mem) return mem;
 
-  // 1) 索引に存在するブロックだけ OPFS から読む(未キャッシュは読み取りを試みない)
+  // 1) ここで初めて OPFS ディレクトリを取得する。索引に存在するブロックだけ読む
+  //    (未キャッシュは getFileHandle の reject 経路を踏まない)。
+  const dir = await getDir();
   const known = await getCachedBlocks(dir);
   if (known.has(idx)) {
     const cached = await readBlock(dir, idx);
@@ -402,10 +408,24 @@ async function fetchAndStoreBlock(
   }
 
   const bytes = new Uint8Array(await resp.arrayBuffer());
-  await writeBlock(dir, idx, bytes);
-  putMemBlock(idx, bytes); // 取得直後の再要求に備えてメモリにも載せる
-  (await getCachedBlocks(dir)).add(idx); // 索引にも反映
+  // メモリには即載せて応答を返し、OPFS への永続化(書き込み + 索引登録)は待たない。
+  putMemBlock(idx, bytes);
+  void persistBlock(dir, idx, bytes);
   return bytes;
+}
+
+// OPFS へのブロック永続化と索引登録(レスポンス経路から外して背後で実行)。
+async function persistBlock(
+  dir: FileSystemDirectoryHandle,
+  idx: number,
+  bytes: Uint8Array
+): Promise<void> {
+  try {
+    await writeBlock(dir, idx, bytes);
+    (await getCachedBlocks(dir)).add(idx); // 書き込めたら索引に反映
+  } catch {
+    /* 永続化失敗は無視(メモリには載っており、次回再取得で復旧する) */
+  }
 }
 
 // -------------------- OPFS ヘルパ --------------------
@@ -446,10 +466,13 @@ async function writeBlock(
 // 一度分かればメモリ変数に保持し、Range レスポンスのたびに OPFS を読まない。
 let totalSizeCache: string | null = null;
 
-// レスポンス経路で使う: メモリにあれば即返し、無ければ OPFS から一度だけ読む。
-async function getTotal(dir: FileSystemDirectoryHandle): Promise<string> {
+// レスポンス経路で使う: メモリにあれば即返し(OPFS に触れない)、無ければ一度だけ読む。
+async function getTotal(
+  getDir: () => Promise<FileSystemDirectoryHandle>
+): Promise<string> {
   if (totalSizeCache !== null) return totalSizeCache;
   try {
+    const dir = await getDir();
     const fh = await dir.getFileHandle("meta.json");
     const file = await fh.getFile();
     totalSizeCache = (JSON.parse(await file.text()) as { totalSize: string })

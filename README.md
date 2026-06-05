@@ -128,6 +128,9 @@ npm test
 - ブロックは固定長 (64KB) に整列。各ブロックは 1 回の Range リクエストで取得する。
 - **OPFS 読み取りは並列**。`ensureBlocks` は必要ブロックを `Promise.all` で同時に読む（逐次 `await` しない）。
 - **メモリ内ブロックキャッシュ (簡易 LRU)**: SW 生存中だけ、最近読んだブロックを `Map<blockIndex, Uint8Array>` に保持（`MEM_MAX_BLOCKS=512` ≒ 32MiB）。`getFileHandle→getFile→arrayBuffer` の OPFS 経路を毎回辿らずに済むため、ホットなブロック（ヘッダ・ディレクトリ・近接タイル）の再読み出しが速い。`acquireBlock()` はメモリ→OPFS→ネットワークの順に当たる。
+- **読み取りは 3 段（メモリ → OPFS → ネットワーク）**。各段の最速で解決する。
+  - **真の memory-only**: OPFS ディレクトリ取得 (`getCacheDir`) はリクエストごとに**遅延化**してあり、全ブロックがメモリヒットするリクエストでは OPFS にも Cache Storage にも一切触れない（`getDir` は最初に OPFS が必要になった時だけ呼ばれる）。
+  - **ネットワーク段は「即応答＋非同期永続化」**: fetch で得たバイト列はメモリに載せてすぐ応答を返し、OPFS への**ブロック書き込みと索引登録はレスポンス経路から外して背後で実行**（`persistBlock` を fire-and-forget）。応答が OPFS 書き込みを待たない。
 - **OPFS ブロック索引 (cachedBlocks Set)**: 起動後に一度だけディレクトリを走査し、存在するブロック番号を `Set<number>` に保持する。未キャッシュブロックでは OPFS の読み取り(`getFileHandle` の reject)を試みずに済み、即ネットワーク取得へ回せる。取得・消去に応じて索引を更新し、索引にあるのに実体が無い場合は整合を取って取得し直す。
 - **同時 Range 要求の重複取得防止 (inFlight Map)**: MapLibre は同時に多数のタイルを要求し、近接タイルが同じ内部範囲(=同じブロック)を要求しうる。`Map<blockIndex, Promise>` で「取得中」の Promise をブロック単位で共有し、同一ブロックの二重 fetch / 二重 write を防ぐ。`acquireBlock()` が起点。
 - **同時ネットワーク取得数の上限 (セマフォ)**: 上流リクエストと OPFS 書き込みの集中を避けるため、実ネットワーク取得の同時実行を `MAX_CONCURRENT_FETCHES`(=12) に制限する。キャッシュ済みブロックの読み出しは上限の対象外（即返す）。

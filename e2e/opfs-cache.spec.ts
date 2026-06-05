@@ -436,10 +436,14 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
       await fetch(url, { headers: { Range: `bytes=${offset}-${offset + 50}` } });
     }, OFFSET);
 
-    // 取得後: OPFS に保存され、かつ cachedBlocks 索引にも登録されている
-    const after = await hasBlock(IDX);
-    expect(after.onDisk).toBe(true);
-    expect(after.inSet).toBe(true);
+    // 永続化は非同期(レスポンス後に背後で書き込む)なので、反映を待つ。
+    // 取得後: OPFS に保存され、かつ cachedBlocks 索引にも登録される。
+    await expect
+      .poll(async () => {
+        const s = await hasBlock(IDX);
+        return s.onDisk && s.inSet;
+      }, { timeout: 10_000 })
+      .toBe(true);
   });
 
   test("キャッシュ全消去ボタンで OPFS が空になる", async ({ page }) => {
@@ -448,6 +452,16 @@ test.describe("OPFS + Service Worker タイルキャッシュ", () => {
     await expect
       .poll(async () => (await readOpfsStats(page)).count, { timeout: 30_000 })
       .toBeGreaterThan(0);
+
+    // 永続化は非同期なので、ブロック数が増え止まる(=取得が静止)まで待ってから消す。
+    // これをしないと、消去後に遅れて届いた書き込みが OPFS を再生成してしまう。
+    let prev = -1;
+    for (let i = 0; i < 25; i++) {
+      const c = (await readOpfsStats(page)).count;
+      if (c === prev) break;
+      prev = c;
+      await page.waitForTimeout(400);
+    }
 
     await page.getByRole("button", { name: "キャッシュを全消去" }).click();
 
